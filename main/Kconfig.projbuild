@@ -1,0 +1,128 @@
+menu "ESP32 remote chassis"
+
+config CAR_MOTORS_ENABLE
+    bool "Enable real motor output (lift wheels before enabling)"
+    default y
+    help
+        Disabled still receives Twist and logs target/measured PPS. Enabling
+        requires valid signs/limits and, in calibrated mode, measured geometry.
+
+choice CAR_MAPPING
+    prompt "Twist to wheel PPS mapping"
+    default CAR_MAPPING_DIRECTION
+config CAR_MAPPING_DIRECTION
+    bool "Direction test: configurable PPS gains, no measured geometry"
+config CAR_MAPPING_CALIBRATED
+    bool "Physical differential drive: measured geometry required"
+endchoice
+
+config CAR_DIRECTION_LINEAR_PPS
+    int "Direction mode: forward PPS at maximum linear.x"
+    range 1 30000
+    default 3000
+config CAR_DIRECTION_TURN_PPS
+    int "Direction mode: turn PPS per wheel at maximum angular.z"
+    range 1 30000
+    default 2000
+config CAR_WHEEL_DIAMETER_MM
+    int "Measured wheel diameter (mm, 0 = unknown)"
+    range 0 1000
+    default 0
+config CAR_TRACK_MM
+    int "Measured wheel center spacing (mm, 0 = unknown)"
+    range 0 2000
+    default 0
+config CAR_TICKS_PER_REV
+    int "Measured PCNT A-rising-edge ticks per wheel revolution (0 = unknown)"
+    range 0 1000000
+    default 0
+
+config CAR_MAX_LINEAR_MM_S
+    int "Accepted absolute linear.x limit (mm/s; direction mode = input scale)"
+    range 1 2000
+    default 300
+config CAR_MAX_ANGULAR_MRAD_S
+    int "Accepted absolute angular.z limit (mrad/s; direction mode = input scale)"
+    range 1 10000
+    default 2000
+config CAR_MAX_WHEEL_PPS
+    int "Absolute wheel target PPS limit (both wheels scaled together)"
+    range 1 100000
+    default 5000
+config CAR_CMD_TIMEOUT_MS
+    int "cmd_vel watchdog timeout (ms)"
+    range 100 1000
+    default 400
+config CAR_PWM_LIMIT
+    int "Absolute PWM limit in BOTH directions (10-bit, full scale 1023)"
+    range 1 1023
+    default 360
+config CAR_PWM_SLEW_PER_S
+    int "Maximum PWM increase per second"
+    range 1 5000
+    default 500
+config CAR_PPS_SLEW_PER_S
+    int "Wheel reference slew rate (PPS/s); zero commands bypass ramp"
+    range 1 100000
+    default 10000
+config CAR_REV_STOP_PPS
+    int "Reversal allowed below this measured absolute speed (PPS)"
+    range 1 5000
+    default 150
+config CAR_REV_QUIET_MS
+    int "Required continuous near-zero coast time before reversal (ms)"
+    range 100 2000
+    default 200
+config CAR_ENCODER_SANITY_PPS
+    int "Absolute measured PPS fault threshold (not the target limit)"
+    range 10000 1000000
+    default 250000
+
+config CAR_LEFT_ENC_SIGN
+    int "Left encoder sign (+1 or -1 only)"
+    range -1 1
+    default 1
+config CAR_RIGHT_ENC_SIGN
+    int "Right encoder sign (+1 or -1 only)"
+    range -1 1
+    default -1
+config CAR_LEFT_MOTOR_SIGN
+    int "Left motor sign (+1 or -1 only; independent of encoder sign)"
+    range -1 1
+    default 1
+config CAR_RIGHT_MOTOR_SIGN
+    int "Right motor sign (+1 or -1 only; independent of encoder sign)"
+    range -1 1
+    default 1
+
+comment "Low-speed feedforward/deadzone must be measured; all default to zero"
+config CAR_LEFT_DEAD_FWD
+    int "Left forward deadzone feedforward PWM (must be <= PWM limit)"
+    range 0 1023
+    default 0
+config CAR_LEFT_DEAD_REV
+    int "Left reverse deadzone feedforward PWM (must be <= PWM limit)"
+    range 0 1023
+    default 0
+config CAR_RIGHT_DEAD_FWD
+    int "Right forward deadzone feedforward PWM (must be <= PWM limit)"
+    range 0 1023
+    default 0
+config CAR_RIGHT_DEAD_REV
+    int "Right reverse deadzone feedforward PWM (must be <= PWM limit)"
+    range 0 1023
+    default 0
+config CAR_LEFT_FF_PWM_PER_KPPS
+    int "Left feedforward PWM per 1000 PPS (symmetric slope)"
+    range 0 1000
+    default 0
+config CAR_RIGHT_FF_PWM_PER_KPPS
+    int "Right feedforward PWM per 1000 PPS (symmetric slope)"
+    range 0 1000
+    default 0
+config CAR_LOG_PERIOD_MS
+    int "Serial telemetry interval (ms)"
+    range 100 10000
+    default 1000
+
+endmenu
