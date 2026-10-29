@@ -1,5 +1,6 @@
 /* Native ESP-IDF / ROS 2 Humble remote chassis. All application code stays here. */
 #include <inttypes.h>
+#include <float.h>
 #include <limits.h>
 #include <math.h>
 #include <stdbool.h>
@@ -60,8 +61,6 @@
 #define KP_SPEED_R 0.038f
 #define KI_SPEED_R 0.290f
 #define SPEED_INTEGRAL_LIMIT 6000.0f
-#define MAX_LINEAR (CONFIG_CAR_MAX_LINEAR_MM_S / 1000.0)
-#define MAX_ANGULAR (CONFIG_CAR_MAX_ANGULAR_MRAD_S / 1000.0)
 
 static const char *TAG = "ESP32_CAR";
 static const int motor_pins[] = {PIN_IN1_A, PIN_IN2_A, PIN_IN1_B, PIN_IN2_B};
@@ -256,13 +255,13 @@ static int64_t count_delta(int current, int previous)
 
 /* Defaults are deliberately unitless direction testing, not measured m/s.
  * Calibrated mode is the standard differential-drive inverse kinematics. */
-static void twist_to_pps(double v, double w, float *left, float *right)
+static bool twist_to_pps(double v, double w, float *left, float *right)
 {
     double l, r;
 #ifdef CONFIG_CAR_MAPPING_CALIBRATED
     if (CONFIG_CAR_WHEEL_DIAMETER_MM <= 0 || CONFIG_CAR_TRACK_MM <= 0 || CONFIG_CAR_TICKS_PER_REV <= 0) {
         *left = *right = 0;
-        return; /* Communication remains usable with unknown calibration. */
+        return true; /* Communication remains usable with unknown calibration. */
     }
     const double track_m = CONFIG_CAR_TRACK_MM / 1000.0;
     const double diameter_m = CONFIG_CAR_WHEEL_DIAMETER_MM / 1000.0;
@@ -270,16 +269,16 @@ static void twist_to_pps(double v, double w, float *left, float *right)
     l = (v - w * track_m * 0.5) * ticks_per_m;
     r = (v + w * track_m * 0.5) * ticks_per_m;
 #else
-    const double forward = v / MAX_LINEAR * CONFIG_CAR_DIRECTION_LINEAR_PPS;
-    const double turn = w / MAX_ANGULAR * CONFIG_CAR_DIRECTION_TURN_PPS;
+    const double forward = v * CONFIG_CAR_LINEAR_PPS_PER_MPS;
+    const double turn = w * CONFIG_CAR_TURN_PPS_PER_RAD_S;
     l = forward - turn;
     r = forward + turn;
 #endif
-    /* Scale together to preserve the left/right ratio when the sum saturates. */
-    double peak = fmax(fabs(l), fabs(r));
-    double scale = peak > CONFIG_CAR_MAX_WHEEL_PPS ? CONFIG_CAR_MAX_WHEEL_PPS / peak : 1.0;
-    *left = (float)(l * scale);
-    *right = (float)(r * scale);
+    /* Reject only numbers that cannot be represented by the float controller. */
+    if (!isfinite(l) || !isfinite(r) || fabs(l) > FLT_MAX || fabs(r) > FLT_MAX) return false;
+    *left = (float)l;
+    *right = (float)r;
+    return true;
 }
 
 typedef struct {
@@ -308,11 +307,9 @@ static float pi_speed_update(wheel_state_t *wheel, float measured, float dt, int
         (dir > 0 ? CONFIG_CAR_LEFT_DEAD_FWD : CONFIG_CAR_LEFT_DEAD_REV) :
         (dir > 0 ? CONFIG_CAR_RIGHT_DEAD_FWD : CONFIG_CAR_RIGHT_DEAD_REV);
     float ff_gain = index == 0 ? CONFIG_CAR_LEFT_FF_PWM_PER_KPPS : CONFIG_CAR_RIGHT_FF_PWM_PER_KPPS;
-    float ff = dead + ff_gain * fabsf(wheel->reference) / 1000.0f;
-    /* Include the upward PWM slew limit in anti-windup. Downward output can
-     * fall immediately, including an unconditional zero for all stop paths. */
-    float upper = fminf(CONFIG_CAR_PWM_LIMIT,
-                       fabsf(wheel->pwm) + CONFIG_CAR_PWM_SLEW_PER_S * dt);
+    float ff = dead + ff_gain * (fabsf(wheel->reference) / 1000.0f);
+    /* A 10-bit PWM still requires a hardware ceiling and anti-windup. */
+    float upper = CONFIG_CAR_PWM_LIMIT;
     float candidate = clampf_local(wheel->integral + error * dt,
                                    -SPEED_INTEGRAL_LIMIT, SPEED_INTEGRAL_LIMIT);
     float raw = ff + wheel->kp * error + wheel->ki * candidate;
@@ -326,7 +323,7 @@ static float pi_speed_update(wheel_state_t *wheel, float measured, float dt, int
 static float wheel_update(wheel_state_t *wheel, float target, float speed,
                           float dt, int64_t now, int index)
 {
-    if (fabsf(target) < 0.01f) {
+    if (target == 0.0f) {
         wheel_stop(wheel);
         return 0;
     }
@@ -355,8 +352,7 @@ static float wheel_update(wheel_state_t *wheel, float target, float speed,
     wheel->reversing = false;
     wheel->quiet_since_us = 0;
     wheel->direction = requested_dir;
-    float step = CONFIG_CAR_PPS_SLEW_PER_S * dt;
-    wheel->reference += clampf_local(target - wheel->reference, -step, step);
+    wheel->reference = target;
     wheel->pwm = pi_speed_update(wheel, speed, dt, index);
     return wheel->pwm;
 }
@@ -395,8 +391,7 @@ static void control_task(void *arg)
             latch_control_stall("control task scheduling timeout while PWM active");
         }
         data.dt = elapsed > 0 ? elapsed / 1000000.0f : 0.02f;
-        /* A long idle/startup delay must not turn the first PWM or reference
-         * slew step into a large jump. PPS still uses the measured interval. */
+        /* Do not integrate across a long idle/startup delay. PPS uses actual dt. */
         float controller_dt = elapsed > CONTROL_MAX_GAP_US ? CONTROL_DT_MS / 1000.0f : data.dt;
         int count_l = prev_l, count_r = prev_r;
         if (pcnt_unit_get_count(pcnt_left_unit, &count_l) != ESP_OK ||
@@ -408,9 +403,7 @@ static void control_task(void *arg)
         data.ticks_r += CONFIG_CAR_RIGHT_ENC_SIGN * dr;
         data.speed_l = LEFT_ENC_SIGN * dl / data.dt;
         data.speed_r = RIGHT_ENC_SIGN * dr / data.dt;
-        if (!isfinite(data.speed_l) || !isfinite(data.speed_r) ||
-            fabsf(data.speed_l) > CONFIG_CAR_ENCODER_SANITY_PPS ||
-            fabsf(data.speed_r) > CONFIG_CAR_ENCODER_SANITY_PPS) latch_fault("encoder PPS invalid or above sanity limit");
+        if (!isfinite(data.speed_l) || !isfinite(data.speed_r)) latch_fault("encoder PPS invalid");
 
         portENTER_CRITICAL(&state_lock);
         if (state.agent && now - state.agent_us > AGENT_LEASE_US) {
@@ -429,7 +422,10 @@ static void control_task(void *arg)
                       (copy.v == 0 && copy.w == 0) ? STOP_ZERO : RUNNING;
         data.target_l = data.target_r = 0;
         /* Compute/log targets even with motors disabled: communication first. */
-        if (copy.valid && copy.wifi && copy.agent) twist_to_pps(copy.v, copy.w, &data.target_l, &data.target_r);
+        if (copy.valid && copy.wifi && copy.agent &&
+            !twist_to_pps(copy.v, copy.w, &data.target_l, &data.target_r)) {
+            latch_fault("command conversion cannot be represented");
+        }
         bool interrupted = copy.stop_sequence != previous_stop_sequence;
         data.interrupted = interrupted;
         previous_stop_sequence = copy.stop_sequence;
@@ -551,14 +547,15 @@ static esp_err_t init_wifi(void)
     return esp_wifi_set_ps(WIFI_PS_NONE);
 }
 
-/* ROS callbacks only validate/copy commands. Even unused Twist components must
- * be finite. Out-of-range x/z invalidates the old command rather than clipping. */
+/* ROS callbacks only validate/copy commands. All components must be finite;
+ * mapped PPS must also fit the controller's floating-point representation. */
 static void cmd_vel_callback(const void *message)
 {
     const geometry_msgs__msg__Twist *msg = message;
+    float target_l, target_r;
     bool valid = isfinite(msg->linear.x) && isfinite(msg->linear.y) && isfinite(msg->linear.z) &&
                  isfinite(msg->angular.x) && isfinite(msg->angular.y) && isfinite(msg->angular.z) &&
-                 fabs(msg->linear.x) <= MAX_LINEAR && fabs(msg->angular.z) <= MAX_ANGULAR;
+                 twist_to_pps(msg->linear.x, msg->angular.z, &target_l, &target_r);
     int64_t now = esp_timer_get_time();
     portENTER_CRITICAL(&state_lock);
     if (!valid) {
@@ -774,7 +771,7 @@ static bool configuration_valid(void)
 static const char *wheel_output_note(float target, float pwm, bool reversing)
 {
     if (reversing) return "coasting before reversal";
-    if (fabsf(target) < 0.01f) return "zero wheel target";
+    if (target == 0.0f) return "zero wheel target";
     if (lroundf(fabsf(pwm)) == 0) return "PI below one PWM count";
     return "driving";
 }
@@ -858,7 +855,7 @@ void app_main(void)
             accepted = copy.accepted;
         }
         if (copy.rejected != rejected) {
-            ESP_LOGW(TAG, "Rejected invalid/out-of-range Twist; command cleared (total=%" PRIu32 ")", copy.rejected);
+            ESP_LOGW(TAG, "Rejected invalid/unrepresentable Twist; command cleared (total=%" PRIu32 ")", copy.rejected);
             rejected = copy.rejected;
         }
         const char *output_note = reason_names[reason];
