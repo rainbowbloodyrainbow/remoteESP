@@ -19,4 +19,9 @@ This is a source vendor copy, not an assumed prebuilt library. Its upstream
 `libmicroros.mk` fetches and builds Humble ROS dependencies during the first
 configure/build. Those transitive branches are upstream-managed, not all pinned
 by the component commit. Network access and the documented Python dependencies
-are still required. No configure/build was run for this task, per user request.
+are still required.
+
+The project provides the Humble `tf2_msgs/msg/TFMessage` interface in
+`extra_ros_packages/tf2_msgs`. The local makefile extension incrementally builds
+its C type support and repacks the prebuilt library, including when adding it
+to an existing micro-ROS workspace; it does not delete the workspace.

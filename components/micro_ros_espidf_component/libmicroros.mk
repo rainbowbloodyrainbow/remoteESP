@@ -100,7 +100,31 @@ $(EXTENSIONS_DIR)/micro_ros_src/install: $(EXTENSIONS_DIR)/esp32_toolchain.cmake
 		-DCMAKE_C_STANDARD=$(C_STANDARD) \
 		-DUCLIENT_C_STANDARD=$(C_STANDARD);
 
-$(EXTENSIONS_DIR)/libmicroros.a: $(EXTENSIONS_DIR)/micro_ros_src/install
+# Add the project's Humble TFMessage interface to existing as well as fresh
+# micro-ROS workspaces. Do not delete or re-clone the already built workspace.
+TF2_PACKAGE := $(EXTRA_ROS_PACKAGES)/tf2_msgs
+ifneq ($(wildcard $(TF2_PACKAGE)/package.xml),)
+TF2_STAMP := $(UROS_DIR)/install/.remoteesp_tf2_msgs
+$(TF2_STAMP): $(UROS_DIR)/install $(TF2_PACKAGE)/package.xml $(TF2_PACKAGE)/CMakeLists.txt $(TF2_PACKAGE)/msg/TFMessage.msg
+	mkdir -p $(UROS_DIR)/src/extra_packages
+	cp -rfL $(TF2_PACKAGE) $(UROS_DIR)/src/extra_packages/
+	cd $(UROS_DIR); \
+	unset AMENT_PREFIX_PATH; \
+	PATH="$(subst /opt/ros/$(ROS_DISTRO)/bin,,$(PATH))"; \
+	. ../micro_ros_dev/install/local_setup.sh; \
+	colcon build --merge-install --packages-ignore-regex=.*_cpp --packages-select tf2_msgs \
+		--metas $(EXTENSIONS_DIR)/colcon.meta $(APP_COLCON_META) \
+		--cmake-args --no-warn-unused-cli \
+		-DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=OFF \
+		-DTHIRDPARTY=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF \
+		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+		-DCMAKE_TOOLCHAIN_FILE=$(EXTENSIONS_DIR)/esp32_toolchain.cmake \
+		-DCMAKE_VERBOSE_MAKEFILE=OFF -DIDF_INCLUDES='${IDF_INCLUDES}' \
+		-DCMAKE_C_STANDARD=$(C_STANDARD) -DUCLIENT_C_STANDARD=$(C_STANDARD)
+	touch $@
+endif
+
+$(EXTENSIONS_DIR)/libmicroros.a: $(EXTENSIONS_DIR)/micro_ros_src/install $(TF2_STAMP) $(EXTENSIONS_DIR)/libmicroros.mk
 	mkdir -p $(UROS_DIR)/libmicroros; cd $(UROS_DIR)/libmicroros; \
 	for file in $$(find $(UROS_DIR)/install/lib/ -name '*.a'); do \
 		folder=$$(echo $$file | sed -E "s/(.+)\/(.+).a/\2/"); \
@@ -112,4 +136,5 @@ $(EXTENSIONS_DIR)/libmicroros.a: $(EXTENSIONS_DIR)/micro_ros_src/install
 	done ; \
 	$(X_AR) rc -s libmicroros.a *.obj; cp libmicroros.a $(EXTENSIONS_DIR); \
 	cd ..; rm -rf libmicroros; \
-	cp -R $(UROS_DIR)/install/include $(EXTENSIONS_DIR)/include;
+	mkdir -p $(EXTENSIONS_DIR)/include; \
+	cp -R $(UROS_DIR)/install/include/. $(EXTENSIONS_DIR)/include/;

@@ -32,6 +32,13 @@ set(EXTRA_ROS_PACKAGES "${PROJECT_DIR}/extra_ros_packages")
 if(NOT EXISTS "${EXTRA_ROS_PACKAGES}")
 set(EXTRA_ROS_PACKAGES "${COMPONENT_DIR}/extra_packages")
 endif()
+if(EXISTS "${EXTRA_ROS_PACKAGES}/tf2_msgs/package.xml")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${EXTRA_ROS_PACKAGES}/tf2_msgs/package.xml"
+    "${EXTRA_ROS_PACKAGES}/tf2_msgs/CMakeLists.txt"
+    "${EXTRA_ROS_PACKAGES}/tf2_msgs/msg/TFMessage.msg"
+    "${COMPONENT_DIR}/libmicroros.mk")
+endif()
 
 if(${CONFIG_MICRO_ROS_ESP_EMBEDDEDRTPS_MIDDLEWARE})
 message(STATUS "Using embeddedRTPS middleware")

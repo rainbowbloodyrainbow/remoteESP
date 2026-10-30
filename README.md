@@ -1,16 +1,17 @@
 # ESP32-D0WD / ROS 2 Humble 遥控底盘
 
 原生 ESP-IDF、`app_main()` + FreeRTOS，全部应用代码保留在
-[`main/remoteESP.c`](main/remoteESP.c)。无 Arduino、循线、OpenMV 或 `/odom`。
+[`main/remoteESP.c`](main/remoteESP.c)。无 Arduino、循线或 OpenMV。
 
 链路：`/cmd_vel` (`geometry_msgs/msg/Twist`) → WiFi UDP4 Agent:8888 →
-`/esp32_car` → 左右轮目标 PPS → 原有 PCNT + PI → LEDC 电机输出。
+`/esp32_car` → 左右轮目标 PPS → 原有 PCNT + PI → LEDC 电机输出；
+PCNT 增量同时用于发布 `/odom` 和 `odom → base_link` TF。
 订阅 QoS 为 **best effort、volatile、keep last 1**，兼容常见的 reliable
 `ros2 topic pub` / `teleop_twist_keyboard` 发布者，避免持久化旧指令。
 
 **当前构建已启用电机，PWM 上限为 1023/1023，参考速度和 PWM 不再做上升限速。首次运行必须架空车轮。** 默认网络配置仍需
-设置 WiFi 和 Agent 地址；方向测试模式无需轮距、轮径或每圈脉冲数，但 Twist 数值只作为方向
-及强弱输入，不代表实际 m/s、rad/s。当前版本尚未完成实车验证。
+设置 WiFi 和 Agent 地址。当前选择 Calibrated 模式，Twist 的线速度和角速度分别以 m/s、
+rad/s 输入。本次里程计版本尚未完成实车验证。
 
 ## 1. SDK 与组件
 
@@ -30,6 +31,8 @@ IDF Python 环境已安装；新环境构建 micro-ROS 前需按下文安装组�
 首次 CMake 配置会由组件下载并交叉构建 ROS 依赖，**连 `menuconfig` 都可能触发该过程**。
 应用已经声明组件依赖，不需要另行创建占位头文件或安装 Arduino 库。
 组件内部的 Humble 依赖由官方构建脚本拉取，其分支并非全部固定到提交。
+工程的 `extra_ros_packages/tf2_msgs` 提供与 Humble 相同的 TFMessage 接口定义；
+组件构建脚本将它加入 micro-ROS 的 C 类型支持。当前设置支持两个 Publisher 和一个订阅。
 
 ## 2. 配置、编译、烧录（由你执行）
 
@@ -65,19 +68,21 @@ idf.py -p /dev/ttyUSB0 flash monitor
 若实际二进制超过分区大小，应按开发板真实 flash 容量调整 `partitions.csv` 和 flash 设置。
 升级组件或更改它的 `colcon.meta` 后可执行 `idf.py clean-microros` 再构建。
 
-## 3. 不依赖轮距的第一阶段
+## 3. 差速指令与标定
 
-默认 `Direction test` 模式：
+当前 `Physical differential drive` 使用实测轮径 47.3 mm、轮距 133.4 mm、
+每轮 10200 ticks/rev（PCNT A 相上升沿、B 相判向）。menuconfig 配置分别为
+`CAR_WHEEL_DIAMETER_TENTH_MM=473`、`CAR_TRACK_TENTH_MM=1334`、
+`CAR_TICKS_PER_REV=10200`，前两项单位均为 0.1 mm。
 
 ```text
-forward = linear.x * 10000 PPS
-turn    = angular.z * 1000 PPS
-left    = forward - turn
-right   = forward + turn
+left_mps  = linear.x - angular.z * track_m / 2
+right_mps = linear.x + angular.z * track_m / 2
+wheel_PPS = wheel_mps * ticks_per_rev / (pi * wheel_diameter_m)
 ```
 
-两个比例可在 menuconfig 调整；上面是方向测试比例，**不是测量得到的底盘参数**。
-不再对线速度、角速度或目标轮速设置上限。实际 PWM 受 10 位硬件最大值约束。
+约 68641.9 ticks/m；例如 `linear.x=0.6, angular.z=0` 对应约 41185 PPS/轮。
+不对线速度、角速度或目标轮速设置人为上限。实际 PWM 受 10 位硬件最大值约束。
 
 | 指令 | 左轮逻辑目标 | 右轮逻辑目标 | 预期方向 |
 |---|---:|---:|---|
@@ -86,23 +91,12 @@ right   = forward + turn
 | `v = 0, w > 0` | − | + | 原地左转 |
 | `v = 0, w < 0` | + | − | 原地右转 |
 | `v = 0, w = 0` | 0 | 0 | PWM 立即归零（下次控制周期内） |
-| `v != 0, w != 0` | `forward-turn` | `forward+turn` | 弧线/差速转弯 |
+| `v != 0, w != 0` | `v-w*L/2` | `v+w*L/2` | 弧线/差速转弯 |
 
 不再拒绝大于 0.3 的线速度或大于 2.0 的角速度。NaN、Infinity 或转换为 PPS 后无法用
 控制器浮点数表示的值会作废原指令并停车，其他 Twist 分量不参与运动，但也必须有限。
 
-## 4. 后续切换真实单位
-
-测量后填写 `Measured wheel diameter`、`Measured wheel center spacing`（mm）、
-`Measured PCNT ... ticks per wheel revolution`，再选 `Physical differential drive`。
-参数初始均为 **0（未知）**。任一缺失时不会驱动电机，仍可接收消息，目标 PPS 显示 0。
-方向测试模式不要求填写这些参数。
-
-```text
-left_mps  = v - w * track_m / 2
-right_mps = v + w * track_m / 2
-wheel_PPS = wheel_mps * ticks_per_rev / (pi * wheel_diameter_m)
-```
+## 4. 编码器里程计
 
 每圈脉冲数必须使用本工程 **A 相上升沿、B 相判方向** 的实际车轮一圈计数，不能套用
 编码器四倍频参数。默认编码器符号左 `+1`、右 `−1`；电机符号独立，初始均为 `+1`。
@@ -110,7 +104,13 @@ wheel_PPS = wheel_mps * ticks_per_rev / (pi * wheel_diameter_m)
 
 PCNT 连续运行，通过两次读数差和真实 `dt` 计算 PPS；高低限 watch point 配合
 `accum_count` 处理硬件计数溢出，应用还处理 32 位计数回绕。保留左右 64 位带符号累计
-脉冲、实际 dt、目标/参考/实测 PPS，供未来 `/odom` 使用。当前不发布里程计。
+脉冲和实际 dt，通过中点积分计算位姿及实际线速度、角速度。本地积分不依赖 WiFi，
+Agent 重连不会清零。约 20 Hz 发布 `nav_msgs/msg/Odometry` 和 `tf2_msgs/msg/TFMessage`，
+两条消息使用相同快照和时间戳，TF 为 `odom → base_link`。
+
+时间由 micro-ROS 与 Agent 系统时钟同步；失败时暂停两条消息并重试，不发布伪造时间。
+这是系统时钟，不跟随 ROS 仿真 `/clock`。两路发布使用可靠 QoS；Odometry 超过默认
+512 字节 UDP MTU，需 XRCE 可靠流分片。协方差当前为零，尚未基于实测估计。
 
 ## 5. Agent、命令与键盘遥控
 
@@ -162,7 +162,7 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard \
 1. 架空两轮、准备切断电机电源；先发布零速度，确认 PWM 为零，再观察目标 PPS 和超时日志。
 2. 零速度时手动分别转动轮子：逻辑前进方向应让左右累计 ticks 都增加，倒转都减少。
    不符时调整对应 encoder sign；保持 PCNT 边沿模式不变。
-3. 使用当前已启用电机的方向测试模式与 1023 PWM 上限。重启本身不应转动；
+3. 使用当前已启用电机的 Calibrated 模式与 1023 PWM 上限。重启本身不应转动；
    只有收到新有效非零命令后允许输出。先发低幅前进、零、后退、零、左转、零、右转。
 4. 对照车轮机械方向、逻辑 PPS 与 PWM。驱动中的明显反号反馈会锁定故障，需修正后复位。
    断电/架空状态下核对接线及两个独立符号，不要靠增加 PI 来掩盖反馈反号。
@@ -220,3 +220,17 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard \
 当前版本使用 ESP-IDF 5.2.7 执行 `idf.py build` 已通过；当前构建启用电机、PWM 上限 1023。
 本轮尚未烧录或实车验证。完成上述架空检查、实际编码器符号/脉冲数确认、双向低速 PI/前馈
 标定、超时/断网/换向实测及上电电气检查后，才能确认实际运动效果。
+
+里程计检查：
+
+```bash
+ros2 topic list
+ros2 topic echo /odom --once
+ros2 topic hz /odom
+ros2 topic echo /tf --once
+ros2 run tf2_ros tf2_echo odom base_link
+```
+
+手动转轮时先确保电机无驱动输出：两轮向前/向后应分别使 x 增加/减小，反向对转应改变
+theta。落地推动约 1 米检查 x 的增量；原地逆时针约 90° 检查航向约为 +π/2。实际轮径、
+地面打滑和有效轮距会造成误差，需要继续标定。

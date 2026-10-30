@@ -9,7 +9,7 @@ config CAR_MOTORS_ENABLE
 
 choice CAR_MAPPING
     prompt "Twist to wheel PPS mapping"
-    default CAR_MAPPING_DIRECTION
+    default CAR_MAPPING_CALIBRATED
 config CAR_MAPPING_DIRECTION
     bool "Direction test: configurable PPS gains, no measured geometry"
 config CAR_MAPPING_CALIBRATED
@@ -24,18 +24,18 @@ config CAR_TURN_PPS_PER_RAD_S
     int "Direction mode: wheel PPS per unit angular.z"
     range 1 100000000
     default 1000
-config CAR_WHEEL_DIAMETER_MM
-    int "Measured wheel diameter (mm, 0 = unknown)"
-    range 0 1000
-    default 0
-config CAR_TRACK_MM
-    int "Measured wheel center spacing (mm, 0 = unknown)"
-    range 0 2000
-    default 0
+config CAR_WHEEL_DIAMETER_TENTH_MM
+    int "Measured wheel diameter (0.1 mm, 0 = unknown)"
+    range 0 10000
+    default 473
+config CAR_TRACK_TENTH_MM
+    int "Measured wheel center spacing (0.1 mm, 0 = unknown)"
+    range 0 20000
+    default 1334
 config CAR_TICKS_PER_REV
     int "Measured PCNT A-rising-edge ticks per wheel revolution (0 = unknown)"
     range 0 1000000
-    default 0
+    default 10200
 
 config CAR_CMD_TIMEOUT_MS
     int "cmd_vel watchdog timeout (ms)"
